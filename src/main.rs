@@ -1,7 +1,11 @@
 #![allow(unused_imports)]
 
 use core::num;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{self, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Error;
 use tokio::{
@@ -12,7 +16,13 @@ use tokio::{
 
 use memchr::memchr;
 
-type Db = Arc<Mutex<HashMap<String, String>>>;
+type Db = Arc<Mutex<HashMap<String, Value>>>;
+
+struct Value {
+    val: String,
+    ts: u64,
+    ttl: u64,
+}
 
 enum RedisType {
     Array(Vec<RedisType>),
@@ -27,7 +37,7 @@ async fn main() {
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
-    let db = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let db = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
 
     loop {
         let stream = listener.accept().await;
@@ -74,8 +84,26 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                 "ping" => Ok(b"+PONG\r\n".to_vec()),
                 "set" => match (&arr[1], &arr[2]) {
                     (RedisType::String(key), RedisType::String(val)) => {
+                        let ttl = match (arr.get(3), arr.get(4)) {
+                            (Some(RedisType::String(unit)), Some(RedisType::String(time))) => {
+                                match unit.to_ascii_lowercase().as_str() {
+                                    "px" => time.parse::<u64>().unwrap(),
+                                    "ex" => time.parse::<u64>().unwrap() * 1000,
+                                    _ => return Err(()),
+                                }
+                            }
+                            _ => 0,
+                        };
                         let mut guard = db.lock().await;
-                        guard.insert(key.clone(), val.clone());
+                        let value = Value {
+                            val: val.clone(),
+                            ts: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64,
+                            ttl: ttl,
+                        };
+                        guard.insert(key.clone(), value);
                         Ok(OK_SIMPLE.to_vec())
                     }
                     _ => Err(()),
@@ -83,11 +111,17 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                 "get" => match &arr[1] {
                     RedisType::String(key) => {
                         let guard = db.lock().await;
-                        if let Some(v) = guard.get(key) {
-                            Ok(encode_bulk(v))
-                        } else {
-                            Ok(NULL_BULK.to_vec())
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        if let Some(Value { val, ts, ttl }) = guard.get(key) {
+                            if *ttl == 0 || *ts + *ttl > now {
+                                return Ok(encode_bulk(val));
+                            }
                         }
+
+                        Ok(NULL_BULK.to_vec())
                     }
                     _ => Err(()),
                 },
