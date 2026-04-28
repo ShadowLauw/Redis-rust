@@ -1,32 +1,41 @@
 #![allow(unused_imports)]
 
 use core::num;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Mutex,
 };
 
 use memchr::memchr;
+
+type Db = Arc<Mutex<HashMap<String, String>>>;
 
 enum RedisType {
     Array(Vec<RedisType>),
     String(String),
 }
 
+const NULL_BULK: &[u8] = b"$-1\r\n";
+const OK_SIMPLE: &[u8] = b"+OK\r\n";
+
 #[tokio::main]
 async fn main() {
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    let db = Arc::new(Mutex::new(HashMap::<String, String>::new()));
 
     loop {
         let stream = listener.accept().await;
         match stream {
             Ok((stream, _)) => {
                 println!("accepted new connection");
-                tokio::spawn(async move { answer(stream).await });
+                let db_t = db.clone();
+                tokio::spawn(async move { handle_connection(stream, db_t).await });
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -35,29 +44,58 @@ async fn main() {
     }
 }
 
-async fn answer(mut stream: TcpStream) {
+async fn handle_connection(mut stream: TcpStream, db: Db) {
     let mut buf = [0; 512];
     loop {
         let bytes_read = stream.read(&mut buf).await.unwrap();
         if bytes_read == 0 {
             break;
         }
-        match parse_redis(&buf, 0) {
-            Ok((RedisType::Array(arr), _)) => match &arr[0] {
-                RedisType::Array(_) => break,
-                RedisType::String(str) => match str.to_ascii_lowercase().as_str() {
-                    "echo" => match &arr[1] {
-                        RedisType::Array(_) => break,
-                        RedisType::String(str) => {
-                            stream.write_all(&encode_bulk(&str)).await.unwrap()
-                        }
-                    },
-                    "ping" => stream.write_all(b"+PONG\r\n").await.unwrap(),
-                    _ => break,
-                },
-            },
-            _ => break,
+
+        let (message, _) = parse_redis(&buf, 0).unwrap();
+        match handle_answer(message, &db).await {
+            Ok(vec) => stream.write_all(&vec).await.unwrap(),
+            Err(_) => stream
+                .write_all("Could not answer".as_bytes())
+                .await
+                .unwrap(),
         }
+    }
+}
+
+async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
+    match msg {
+        RedisType::Array(arr) => match &arr[0] {
+            RedisType::String(str) => match str.to_ascii_lowercase().as_str() {
+                "echo" => match &arr[1] {
+                    RedisType::String(str) => Ok(encode_bulk(&str)),
+                    RedisType::Array(_) => Err(()),
+                },
+                "ping" => Ok(b"+PONG\r\n".to_vec()),
+                "set" => match (&arr[1], &arr[2]) {
+                    (RedisType::String(key), RedisType::String(val)) => {
+                        let mut guard = db.lock().await;
+                        guard.insert(key.clone(), val.clone());
+                        Ok(OK_SIMPLE.to_vec())
+                    }
+                    _ => Err(()),
+                },
+                "get" => match &arr[1] {
+                    RedisType::String(key) => {
+                        let guard = db.lock().await;
+                        if let Some(v) = guard.get(key) {
+                            Ok(encode_bulk(v))
+                        } else {
+                            Ok(NULL_BULK.to_vec())
+                        }
+                    }
+                    _ => Err(()),
+                },
+                _ => Err(()),
+            },
+            RedisType::Array(_) => Err(()),
+        },
+        _ => Err(()),
     }
 }
 
@@ -148,4 +186,8 @@ fn array(buf: &[u8], pos: usize) -> Result<(RedisType, usize), ()> {
 
 fn encode_bulk(str: &String) -> Vec<u8> {
     format!("${}\r\n{}\r\n", str.len(), str).into_bytes()
+}
+
+fn encode_simple(str: &String) -> Vec<u8> {
+    format!("+{}\r\n", str).into_bytes()
 }
