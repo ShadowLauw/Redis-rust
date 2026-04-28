@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use std::{
-    io::Write,
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
 };
 
@@ -23,5 +23,9 @@ fn main() {
 }
 
 fn answer(mut stream: TcpStream) {
-    let _ = stream.write_all(b"+PONG\r\n");
+    let mut buf = [0; 512];
+    loop {
+        stream.read(&mut buf).unwrap();
+        stream.write(b"+PONG\r\n").unwrap();
+    }
 }
