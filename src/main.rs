@@ -41,6 +41,7 @@ struct ThreadStatus {
 
 const NULL_BULK: &[u8] = b"$-1\r\n";
 const OK_SIMPLE: &[u8] = b"+OK\r\n";
+const QUEUED_SIMPLE: &[u8] = b"+QUEUED\r\n";
 
 #[tokio::main]
 async fn main() {
@@ -91,75 +92,106 @@ async fn handle_answer(msg: RedisType, db: &Db, t_stat: &mut ThreadStatus) -> Re
     match msg {
         RedisType::Array(arr) => match &arr[0] {
             RedisType::String(str) => match str.to_ascii_lowercase().as_str() {
-                "echo" => match &arr[1] {
-                    RedisType::String(str) => Ok(encode_bulk(&str)),
-                    RedisType::Array(_) => Err(()),
-                },
-                "ping" => Ok(b"+PONG\r\n".to_vec()),
-                "set" => match (&arr[1], &arr[2]) {
-                    (RedisType::String(key), RedisType::String(val)) => {
-                        let ttl = match (arr.get(3), arr.get(4)) {
-                            (Some(RedisType::String(unit)), Some(RedisType::String(time))) => {
-                                match unit.to_ascii_lowercase().as_str() {
-                                    "px" => Some(time.parse::<u64>().unwrap()),
-                                    "ex" => Some(time.parse::<u64>().unwrap() * 1000),
-                                    _ => return Err(()),
+                "echo" => {
+                    if t_stat.status == Status::SYNC {
+                        match &arr[1] {
+                            RedisType::String(str) => Ok(encode_bulk(&str)),
+                            RedisType::Array(_) => Err(()),
+                        }
+                    } else {
+                        Ok(QUEUED_SIMPLE.to_vec())
+                    }
+                }
+                "ping" => {
+                    if t_stat.status == Status::SYNC {
+                        Ok(b"+PONG\r\n".to_vec())
+                    } else {
+                        Ok(QUEUED_SIMPLE.to_vec())
+                    }
+                }
+                "set" => {
+                    if t_stat.status == Status::SYNC {
+                        match (&arr[1], &arr[2]) {
+                            (RedisType::String(key), RedisType::String(val)) => {
+                                let ttl = match (arr.get(3), arr.get(4)) {
+                                    (
+                                        Some(RedisType::String(unit)),
+                                        Some(RedisType::String(time)),
+                                    ) => match unit.to_ascii_lowercase().as_str() {
+                                        "px" => Some(time.parse::<u64>().unwrap()),
+                                        "ex" => Some(time.parse::<u64>().unwrap() * 1000),
+                                        _ => return Err(()),
+                                    },
+                                    _ => None,
+                                };
+                                db.lock()
+                                    .await
+                                    .insert(key.clone(), Value { val: val.clone() });
+
+                                if let Some(v) = ttl {
+                                    let db = db.clone();
+                                    let key = key.clone();
+                                    tokio::spawn(async move {
+                                        sleep(Duration::from_millis(v)).await;
+                                        db.lock().await.remove(&key);
+                                    });
                                 }
+                                Ok(OK_SIMPLE.to_vec())
                             }
-                            _ => None,
-                        };
-                        db.lock()
-                            .await
-                            .insert(key.clone(), Value { val: val.clone() });
-
-                        if let Some(v) = ttl {
-                            let db = db.clone();
-                            let key = key.clone();
-                            tokio::spawn(async move {
-                                sleep(Duration::from_millis(v)).await;
-                                db.lock().await.remove(&key);
-                            });
+                            _ => Err(()),
                         }
-                        Ok(OK_SIMPLE.to_vec())
+                    } else {
+                        Ok(QUEUED_SIMPLE.to_vec())
                     }
-                    _ => Err(()),
-                },
-                "get" => match &arr[1] {
-                    RedisType::String(key) => {
-                        let guard = db.lock().await;
-                        if let Some(Value { val }) = guard.get(key) {
-                            return Ok(encode_bulk(val));
-                        }
+                }
+                "get" => {
+                    if t_stat.status == Status::SYNC {
+                        match &arr[1] {
+                            RedisType::String(key) => {
+                                let guard = db.lock().await;
+                                if let Some(Value { val }) = guard.get(key) {
+                                    return Ok(encode_bulk(val));
+                                }
 
-                        Ok(NULL_BULK.to_vec())
-                    }
-                    _ => Err(()),
-                },
-                "incr" => match &arr[1] {
-                    RedisType::String(key) => {
-                        let mut db = db.lock().await;
-                        let entry = db.entry(key.clone()).or_insert(Value {
-                            val: "0".to_string(),
-                        });
-
-                        let mut count = match entry.val.parse::<i64>() {
-                            Ok(n) => n,
-
-                            Err(_) => {
-                                return Ok(encode_error(
-                                    &"value is not an integer or out of range".to_string(),
-                                ));
+                                Ok(NULL_BULK.to_vec())
                             }
-                        };
-
-                        count += 1;
-
-                        entry.val = count.to_string();
-
-                        Ok(encode_int(count))
+                            _ => Err(()),
+                        }
+                    } else {
+                        Ok(QUEUED_SIMPLE.to_vec())
                     }
-                    _ => Err(()),
-                },
+                }
+                "incr" => {
+                    if t_stat.status == Status::SYNC {
+                        match &arr[1] {
+                            RedisType::String(key) => {
+                                let mut db = db.lock().await;
+                                let entry = db.entry(key.clone()).or_insert(Value {
+                                    val: "0".to_string(),
+                                });
+
+                                let mut count = match entry.val.parse::<i64>() {
+                                    Ok(n) => n,
+
+                                    Err(_) => {
+                                        return Ok(encode_error(
+                                            &"value is not an integer or out of range".to_string(),
+                                        ));
+                                    }
+                                };
+
+                                count += 1;
+
+                                entry.val = count.to_string();
+
+                                Ok(encode_int(count))
+                            }
+                            _ => Err(()),
+                        }
+                    } else {
+                        Ok(QUEUED_SIMPLE.to_vec())
+                    }
+                }
                 "multi" => {
                     t_stat.status = Status::TRANS;
                     Ok(OK_SIMPLE.to_vec())
