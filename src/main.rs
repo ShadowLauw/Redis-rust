@@ -127,11 +127,21 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                             val: "0".to_string(),
                         });
 
-                        let new_count = entry.val.parse::<i64>().unwrap() + 1;
+                        let mut count = match entry.val.parse::<i64>() {
+                            Ok(n) => n,
 
-                        entry.val = new_count.to_string();
+                            Err(_) => {
+                                return Ok(encode_error(
+                                    &"value is not an integer or out of range".to_string(),
+                                ));
+                            }
+                        };
 
-                        Ok(encode_int(new_count))
+                        count += 1;
+
+                        entry.val = count.to_string();
+
+                        Ok(encode_int(count))
                     }
                     _ => Err(()),
                 },
@@ -238,4 +248,8 @@ fn encode_simple(str: &String) -> Vec<u8> {
 
 fn encode_int(val: i64) -> Vec<u8> {
     format!(":{}\r\n", val).into_bytes()
+}
+
+fn encode_error(str: &String) -> Vec<u8> {
+    format!("-ERR {}\r\n", str).into_bytes()
 }
