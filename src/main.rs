@@ -116,6 +116,10 @@ async fn handle_answer(msg: RedisType, db: &Db, t_stat: &mut ThreadStatus) -> Re
                     }
                     t_stat.status = Status::SYNC;
                     Ok(encode_array(ans))
+                } else if str.to_ascii_lowercase() == "discard" {
+                    t_stat.transactions = vec![];
+                    t_stat.status = Status::SYNC;
+                    Ok(OK_SIMPLE.to_vec())
                 } else {
                     t_stat.transactions.push(arr);
                     Ok(QUEUED_SIMPLE.to_vec())
@@ -208,13 +212,8 @@ async fn handle_answer_by_type(
             t_stat.status = Status::TRANS;
             Ok(OK_SIMPLE.to_vec())
         }
-        "exec" => {
-            if t_stat.status == Status::TRANS {
-                Ok(encode_array(vec![]))
-            } else {
-                Ok(encode_error("EXEC without MULTI".to_string()))
-            }
-        }
+        "exec" => Ok(encode_error("EXEC without MULTI".to_string())),
+        "discard" => Ok(encode_error("DISCARD without MULTI".to_string())),
         _ => Err(()),
     }
 }
