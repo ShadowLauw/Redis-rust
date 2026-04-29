@@ -27,6 +27,8 @@ enum RedisType {
     String(String),
 }
 type Transaction = Box<dyn FnOnce() + Send>;
+
+#[derive(PartialEq)]
 enum Status {
     SYNC,
     TRANS,
@@ -53,7 +55,11 @@ async fn main() {
             Ok((stream, _)) => {
                 println!("accepted new connection");
                 let db_t = db.clone();
-                tokio::spawn(async move { handle_connection(stream, db_t).await });
+                let t_stat = ThreadStatus {
+                    status: Status::SYNC,
+                    transactions: vec![],
+                };
+                tokio::spawn(async move { handle_connection(stream, db_t, t_stat).await });
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -62,7 +68,7 @@ async fn main() {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, db: Db) {
+async fn handle_connection(mut stream: TcpStream, db: Db, mut t_stat: ThreadStatus) {
     let mut buf = [0; 512];
     loop {
         let bytes_read = stream.read(&mut buf).await.unwrap();
@@ -71,7 +77,7 @@ async fn handle_connection(mut stream: TcpStream, db: Db) {
         }
 
         let (message, _) = parse_redis(&buf, 0).unwrap();
-        match handle_answer(message, &db).await {
+        match handle_answer(message, &db, &mut t_stat).await {
             Ok(vec) => stream.write_all(&vec).await.unwrap(),
             Err(_) => stream
                 .write_all("Could not answer".as_bytes())
@@ -81,7 +87,7 @@ async fn handle_connection(mut stream: TcpStream, db: Db) {
     }
 }
 
-async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
+async fn handle_answer(msg: RedisType, db: &Db, t_stat: &mut ThreadStatus) -> Result<Vec<u8>, ()> {
     match msg {
         RedisType::Array(arr) => match &arr[0] {
             RedisType::String(str) => match str.to_ascii_lowercase().as_str() {
@@ -154,8 +160,18 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                     }
                     _ => Err(()),
                 },
-                "multi" => Ok(OK_SIMPLE.to_vec()),
-                "exec" => Ok(encode_error(&"EXEC without MULTI".to_string())),
+                "multi" => {
+                    t_stat.status = Status::TRANS;
+                    Ok(OK_SIMPLE.to_vec())
+                }
+                "exec" => {
+                    if t_stat.status == Status::TRANS {
+                        t_stat.status = Status::SYNC;
+                        Ok(encode_array(vec![]))
+                    } else {
+                        Ok(encode_error(&"EXEC without MULTI".to_string()))
+                    }
+                }
                 _ => Err(()),
             },
             RedisType::Array(_) => Err(()),
@@ -263,4 +279,14 @@ fn encode_int(val: i64) -> Vec<u8> {
 
 fn encode_error(str: &String) -> Vec<u8> {
     format!("-ERR {}\r\n", str).into_bytes()
+}
+
+fn encode_array(vec: Vec<String>) -> Vec<u8> {
+    let mut res = format!("*{}\r\n", vec.len());
+
+    for s in vec {
+        res.push_str(&format!("${}\r\n{}\r\n", s.len(), s));
+    }
+
+    res.into_bytes()
 }
