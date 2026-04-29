@@ -120,6 +120,31 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                     }
                     _ => Err(()),
                 },
+                "incr" => match &arr[1] {
+                    RedisType::String(key) => {
+                        let mut db = db.lock().await;
+                        let entry = db.entry(key.clone()).or_insert(Value {
+                            val: "0".to_string(),
+                        });
+
+                        let mut count = match entry.val.parse::<i64>() {
+                            Ok(n) => n,
+
+                            Err(_) => {
+                                return Ok(encode_error(
+                                    &"value is not an integer or out of range".to_string(),
+                                ));
+                            }
+                        };
+
+                        count += 1;
+
+                        entry.val = count.to_string();
+
+                        Ok(encode_int(count))
+                    }
+                    _ => Err(()),
+                },
                 _ => Err(()),
             },
             RedisType::Array(_) => Err(()),
@@ -219,4 +244,12 @@ fn encode_bulk(str: &String) -> Vec<u8> {
 
 fn encode_simple(str: &String) -> Vec<u8> {
     format!("+{}\r\n", str).into_bytes()
+}
+
+fn encode_int(val: i64) -> Vec<u8> {
+    format!(":{}\r\n", val).into_bytes()
+}
+
+fn encode_error(str: &String) -> Vec<u8> {
+    format!("-ERR {}\r\n", str).into_bytes()
 }
