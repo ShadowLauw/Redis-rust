@@ -155,6 +155,7 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                     _ => Err(()),
                 },
                 "multi" => Ok(OK_SIMPLE.to_vec()),
+                "exec" => Ok(encode_error(&"EXEC without MULTI".to_string())),
                 _ => Err(()),
             },
             RedisType::Array(_) => Err(()),
