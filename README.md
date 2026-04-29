@@ -17,5 +17,10 @@ A toy Redis clone built in Rust (for the CodeCrafters "Build Your Own Redis" cha
 - Concurrent clients (async + tasks)
 
 - In-memory storage (`HashMap`)
+- `INCR` command support (transaction-safe)
+
+- Transactions support (`MULTI`, `EXEC`, `DISCARD`)
+
+- Multi-client transaction isolation
 
 ---
