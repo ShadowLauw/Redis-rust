@@ -7,7 +7,6 @@ use std::{
     time::{self, Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,6 +25,16 @@ struct Value {
 enum RedisType {
     Array(Vec<RedisType>),
     String(String),
+}
+type Transaction = Box<dyn FnOnce() + Send>;
+enum Status {
+    SYNC,
+    TRANS,
+}
+
+struct ThreadStatus {
+    status: Status,
+    transactions: Vec<Transaction>,
 }
 
 const NULL_BULK: &[u8] = b"$-1\r\n";
@@ -145,6 +154,7 @@ async fn handle_answer(msg: RedisType, db: &Db) -> Result<Vec<u8>, ()> {
                     }
                     _ => Err(()),
                 },
+                "multi" => Ok(OK_SIMPLE.to_vec()),
                 _ => Err(()),
             },
             RedisType::Array(_) => Err(()),
